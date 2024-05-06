@@ -1,0 +1,202 @@
+import os.path as osp
+import os
+import scipy.sparse as sp
+import torch
+import numpy as np
+from torch_geometric.io import read_txt_array
+from torch_geometric.utils import coalesce, cumsum
+from torch_geometric.data import Data
+import datetime
+import math
+import pickle
+import json
+
+path = './data/UPFD'
+
+
+def ensure_directory(path):
+    path = os.path.split(path)
+    if not os.path.exists(path[0]):
+        os.makedirs(path[0])
+
+
+def snapshot_to_data(snapshot, target, edges_from, edges_to):
+    snapshot = sorted(snapshot, key=lambda node: node[0])
+    indices = [node[0] for node in snapshot]
+
+    sc_target = target
+
+    sc_nodes = [node[2].tolist() for node in snapshot]
+    sc_nodes = torch.tensor(sc_nodes, dtype=torch.float)
+
+    sc_edges = []
+    for i in range(len(edges_to)):
+        if edges_to[i] in indices:
+            sc_edges.append([int(edges_from[i]), int(edges_to[i])])
+
+    reindex_map = {old_index: new_index for new_index, old_index in enumerate(indices)}
+    updated_edges = [[reindex_map[f], reindex_map[t]] for f, t in sc_edges]
+    sc_edges = torch.tensor(updated_edges, dtype=torch.long).t().contiguous()
+
+    return Data(x=sc_nodes, edge_index=sc_edges, y=sc_target)
+
+
+def process(root, name, feature, split, snapshot_type=None, number_snapshots=5):
+    assert snapshot_type in [None, 'sequential', 'temporal', 'calendar']
+    assert name in ['gossipcop', 'politifact']
+    assert feature in ['profile', 'spacy', 'bert', 'content']
+    assert split in ['train', 'val', 'test']
+
+    raw_dir = osp.join(root, name, 'raw')
+    x = sp.load_npz(
+        osp.join(raw_dir, f'new_{feature}_feature.npz'))
+    x = torch.from_numpy(x.todense()).to(torch.float)
+
+    edge_index = read_txt_array(osp.join(raw_dir, 'A.txt'), sep=',',
+                                dtype=torch.long).t()
+    edge_index = coalesce(edge_index, num_nodes=x.size(0))
+
+    y = np.load(osp.join(raw_dir, 'graph_labels.npy'))
+    y = torch.from_numpy(y).to(torch.long)
+    _, y = y.unique(sorted=True, return_inverse=True)
+
+    batch = np.load(osp.join(raw_dir, 'node_graph_id.npy'))
+    batch = torch.from_numpy(batch).to(torch.long)
+
+    node_slice = cumsum(batch.bincount())
+    edge_slice = cumsum(batch[edge_index[0]].bincount())
+
+    edge_index -= node_slice[batch[edge_index[0]]].view(1, -1)
+
+    idx = np.load(osp.join(raw_dir, f'{split}_idx.npy')).tolist()
+
+    time_list = []
+
+    if name == 'gossipcop':
+        timedict = pickle.load(open(osp.join(path, 'gos_id_time_mapping.pkl'), 'rb'))
+    else:
+        timedict = pickle.load(open(osp.join(path, 'pol_id_time_mapping.pkl'), 'rb'))
+
+    if timedict is not None:
+        for i in range(len(timedict)):
+            if timedict[i] == '':
+                time_list.append(i)
+                timedict[i] = timedict[i + 1]
+
+            timedict[i] = datetime.datetime.fromtimestamp(int(timedict[i]))
+
+    graphlist = []
+    for d in idx:
+
+        if d == 72 and name == 'gossipcop':
+            pass  # --> fault in the data
+        elif d == 0:
+            pass # --> fault in data
+        else:
+            target = y[d]
+
+            edges_from = edge_index[0][edge_slice[d - 1]:edge_slice[d]]
+            edges_to = edge_index[1][edge_slice[d - 1]:edge_slice[d]]
+            nodes = x[node_slice[d - 1]:node_slice[d]]
+
+            stamps = []
+            for i in range(time_list[d - 1], time_list[d]):
+                stamps.append(timedict[i])
+
+            index = [i for i in range(len(nodes))]
+
+            time_nodes = list(zip(index, stamps, nodes))
+            time_nodes = sorted(time_nodes, key=lambda node: node[1])
+
+            if snapshot_type == 'sequential':
+                assert number_snapshots is not None
+
+                interval = math.ceil(len(time_nodes) / number_snapshots)
+
+                sc_list = []
+                for sc in range(1, number_snapshots + 1):
+                    nr_nodes = interval * sc
+
+                    if nr_nodes > len(time_nodes):
+                        snapshot = time_nodes
+
+                    else:
+                        snapshot = time_nodes[:nr_nodes]
+
+                    sc_data = snapshot_to_data(snapshot, target, edges_from, edges_to)
+                    sc_list.append(sc_data)
+
+                graphlist.append(sc_list)
+
+            elif snapshot_type == 'temporal':
+                assert number_snapshots is not None
+                time_range = time_nodes[-1][1] - time_nodes[0][1]
+                time_interval = time_range / number_snapshots
+
+                sc_list = []
+                for sc in range(1, number_snapshots + 1):
+
+                    threshold = time_nodes[0][1] + sc * time_interval
+
+                    if threshold > time_nodes[-1][1]:
+                        snapshot = time_nodes
+
+                    else:
+                        snapshot = [node for node in time_nodes if node[1] < threshold]
+
+                    sc_data = snapshot_to_data(snapshot, target, edges_from, edges_to)
+                    sc_list.append(sc_data)
+
+                graphlist.append(sc_list)
+
+            elif snapshot_type == 'calendar':
+
+                day = datetime.timedelta(days=1)
+                week = datetime.timedelta(weeks=1)
+                month = datetime.timedelta(days=30)
+                year = datetime.timedelta(weeks=52)
+                full = datetime.timedelta(weeks=1000)
+                intervals = [day, week, month, year, full]
+
+                sc_list = []
+                for interval in intervals:
+
+                    threshold = time_nodes[0][1] + interval
+
+                    if threshold > time_nodes[-1][1]:
+                        snapshot = time_nodes
+
+                    else:
+                        snapshot = [node for node in time_nodes if node[1] < threshold]
+
+                    sc_data = snapshot_to_data(snapshot, target, edges_from, edges_to)
+                    sc_list.append(sc_data)
+
+                graphlist.append(sc_list)
+
+            else:
+                edges = torch.stack((edges_from, edges_to), 0)
+
+                graph = Data(x=nodes, edge_index=edges, y=target)
+                graphlist.append(graph)
+
+    return graphlist
+
+
+def save_datasets():
+    for name in ['gossipcop', 'politifact']:
+        for feature in ['profile', 'spacy', 'bert', 'content']:
+            for split in ['train', 'val', 'test']:
+                for snapshot_type in [None, 'sequential', 'temporal', 'calendar']:
+
+                    graphlist = process(path, name, feature, split, snapshot_type)
+                    if snapshot_type is None:
+                        snapshot_type = 'none'
+                    list_path = osp.join(path, 'raw', name, feature, split, snapshot_type)
+                    ensure_directory(list_path)
+                    torch.save(graphlist, list_path)
+
+
+#save_datasets()
+
+
