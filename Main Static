@@ -5,7 +5,7 @@ import os.path as osp
 import copy
 from statistics import mean
 
-from Train & test func import train_static, test_static, train_dynamic, test_dynamic
+from Train & test functions import train_static, test_static, train_dynamic, test_dynamic
 
 from Models import GCN, GAT, GraphSAGE
 
