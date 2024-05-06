@@ -1,0 +1,103 @@
+import torch
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+# TEST & TRAIN FUNC #
+
+
+def train_static(model, data_loader, optimizer, criterion, device):
+    model.train()
+    total_loss = total_correct = total_examples = 0
+    for data in data_loader:
+        data = data.to(device)
+        optimizer.zero_grad()
+        out = model(data)
+        loss = criterion(out, data.y)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        pred = out.argmax(dim=-1)
+        total_correct += int((pred == data.y).sum())
+        total_examples += data.num_graphs
+
+    return total_loss / len(data_loader), total_correct / total_examples  # loss, accuracy
+
+
+def train_dynamic(model, train_loader, optimizer, criterion, device):
+    model.train()
+    total_loss = total_correct = total_examples = 0
+    for batch_index, batch_data in enumerate(train_loader):
+        snapshots = [batch_data[i].to(device) for i in range(len(batch_data))]
+        # reset gradients
+        optimizer.zero_grad()
+        # pass node features and
+        out = model(snapshots)
+        # calculate loss and gradients
+        loss = criterion(out, batch_data[0].y)
+        del snapshots
+        loss.backward()
+        # update using the gradients
+        optimizer.step()
+
+        total_loss += loss.item()
+        pred = out.argmax(dim=-1)
+        total_correct += int((pred == batch_data[0].y).sum())
+        total_examples += batch_data[0].num_graphs
+
+    return total_loss / len(train_loader), total_correct / total_examples  # loss, accuracy
+
+
+@torch.no_grad()
+def test_static(model, data_loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    for data in data_loader:
+        data = data.to(device)
+        out = model(data)
+        if len(out) == len(data.y):
+            loss = criterion(out, data.y)
+            total_loss += loss.item()
+            all_preds.append(out.argmax(dim=-1))
+            all_labels.append(data.y.float())
+
+    # Calculate Metrics
+    preds = torch.round(torch.cat(all_preds))
+    gts = torch.cat(all_labels)
+    accuracy = accuracy_score(gts, preds)
+    f1 = f1_score(gts, preds)
+    precision = precision_score(gts, preds)
+    recall = recall_score(gts, preds)
+
+    return total_loss / len(data_loader), accuracy, f1, precision, recall
+
+
+@torch.no_grad()
+def test_dynamic(model, data_loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    for batch_data in data_loader:
+        snapshots = [batch_data[i].to(device) for i in range(len(batch_data))]
+        out = model(snapshots)
+        loss = criterion(out, batch_data[0].y)
+        del snapshots
+        total_loss += loss.item()
+        if len(out) == len(batch_data[0].y):
+            all_preds.append(out.argmax(dim=-1))
+            all_labels.append(batch_data[0].y.float())
+
+    # Calculate Metrics
+    preds = torch.round(torch.cat(all_preds))
+    gts = torch.cat(all_labels)
+    accuracy = accuracy_score(gts, preds)
+    f1 = f1_score(gts, preds)
+    precision = precision_score(gts, preds, zero_division=0.0)
+    recall = recall_score(gts, preds)
+
+    return total_loss / len(data_loader), accuracy, f1, precision, recall
