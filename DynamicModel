@@ -1,0 +1,54 @@
+import torch.nn as nn
+from torch_geometric.nn import Linear
+import torch.nn.functional as F
+import torch
+from Models import GCN, GAT, GraphSAGE, LSTM, GRU
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+class DynGNN(nn.Module):
+    def __init__(self, gnn_type, in_feats, hid_feats, dropout_rate, snapshot_num, attention_layer):
+        super(DynGNN, self).__init__()
+
+        self.snapshot_num = snapshot_num
+        self.attention_layer = attention_layer
+        self.hidden_feats = hid_feats
+        self.device = device
+        if gnn_type == 'gcn':
+            self.gnn = GCN(in_feats, hid_feats * 2, hid_feats, dropout_rate)
+        elif gnn_type == 'gat':
+            self.gnn = GAT(in_feats, hid_feats * 2, hid_feats, heads=2, dropout_rate=dropout_rate)
+        elif gnn_type == 'graphsage':
+            self.gnn = GraphSAGE(in_feats, hid_feats * 2, hid_feats, dropout_rate)
+
+        if self.attention_layer == "lstm":
+            self.RNN = LSTM(hid_feats, hid_feats)
+        elif self.attention_layer == "gru":
+            self.RNN = GRU(hid_feats, hid_feats)
+
+        self.fc = Linear(hid_feats, 2)
+
+    def attention_module(self, x):
+
+        if self.attention_layer == "mean":
+            x_stack = torch.stack(x, 1)
+            x = x_stack.mean(dim=1)
+
+        else:
+            x_stack = torch.stack(x, 1)  # --> input = BS x SeqLength x input_size
+            x = self.RNN(x_stack)
+
+        return x
+
+    def forward(self, snapshots):
+
+        x = []
+        for s in snapshots:
+            x.append(self.gnn(s))
+
+        x = self.attention_module(x)
+
+        x = self.fc(x)
+        x = F.log_softmax(x, dim=1)
+
+        return x
