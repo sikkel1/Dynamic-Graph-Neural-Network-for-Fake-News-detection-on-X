@@ -7,11 +7,11 @@ from Models import GCN, GAT, GraphSAGE, LSTM, GRU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class DynGNN(nn.Module):
-    def __init__(self, gnn_type, in_feats, hid_feats, dropout_rate, snapshot_num, attention_layer):
+    def __init__(self, gnn_type, in_feats, hid_feats, dropout_rate, snapshot_num, rnn_type):
         super(DynGNN, self).__init__()
 
         self.snapshot_num = snapshot_num
-        self.attention_layer = attention_layer
+        self.rnn_type = rnn_type
         self.hidden_feats = hid_feats
         self.device = device
         if gnn_type == 'gcn':
@@ -21,16 +21,16 @@ class DynGNN(nn.Module):
         elif gnn_type == 'graphsage':
             self.gnn = GraphSAGE(in_feats, hid_feats * 2, hid_feats, dropout_rate)
 
-        if self.attention_layer == "lstm":
+        if self.rnn_type == "lstm":
             self.RNN = LSTM(hid_feats, hid_feats)
-        elif self.attention_layer == "gru":
+        elif self.rnn_type == "gru":
             self.RNN = GRU(hid_feats, hid_feats)
 
         self.fc = Linear(hid_feats, 2)
 
     def attention_module(self, x):
 
-        if self.attention_layer == "mean":
+        if self.rnn_type == "mean":
             x_stack = torch.stack(x, 1)
             x = x_stack.mean(dim=1)
 
